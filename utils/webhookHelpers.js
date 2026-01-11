@@ -103,8 +103,37 @@ export async function handlePaymentApproved(paymentData) {
             }
         }
 
-        // 5. Gerar tickets automaticamente APENAS SE ATUALIZOU TRANSACTIONS
-        if (updatedTransactions && updatedTransactions.length > 0) {
+        // 🆕 Se nenhuma transaction foi atualizada E não existe nenhuma transaction, criar uma nova
+        let transactionsForTickets = updatedTransactions;
+        if ((!updatedTransactions || updatedTransactions.length === 0) && (!existingTrx || existingTrx.length === 0)) {
+            console.log('⚠️ Nenhuma transaction encontrada para esta ordem, criando nova...');
+
+            const { data: newTransaction, error: createError } = await supabase
+                .from('transactions')
+                .insert({
+                    order_id: order.id,
+                    user_id: order.user_id,
+                    buyer_id: order.user_id,
+                    event_id: order.event_id,
+                    mercadopago_payment_id: id.toString(),
+                    amount: transaction_amount,
+                    status: 'completed',
+                    payment_method: payment_method_id,
+                    paid_at: paymentData.date_approved || new Date().toISOString(),
+                    created_at: new Date().toISOString()
+                })
+                .select();
+
+            if (createError) {
+                console.error('❌ Erro ao criar transaction:', createError);
+            } else {
+                console.log('✅ Transaction criada pelo webhook:', newTransaction);
+                transactionsForTickets = newTransaction;
+            }
+        }
+
+        // 5. Gerar tickets automaticamente APENAS SE TEM TRANSACTIONS
+        if (transactionsForTickets && transactionsForTickets.length > 0) {
             console.log('🎫 Gerando tickets para transactions recém-atualizadas...');
 
             const orderMetadata = order.metadata || {};
