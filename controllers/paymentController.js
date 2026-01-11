@@ -192,30 +192,62 @@ export const handleWebhook = async (req, res) => {
 
         console.log('🔔 Webhook recebido:', { type, data });
 
-        // Responder imediatamente para o Mercado Pago
+        // ✅ RESPONDER 200 OK IMEDIATAMENTE (evita timeout)
         res.sendStatus(200);
 
-        // Processar notificação de forma assíncrona
-        if (type === 'payment') {
-            const paymentId = data.id;
+        // ✅ PROCESSAR EM BACKGROUND (não bloqueia resposta)
+        setImmediate(async () => {
+            try {
+                console.log(`⚡ Iniciando processamento em background...`);
 
-            // Consultar detalhes do pagamento
-            const paymentData = await payment.get({ id: paymentId });
+                // Processar notificação de pagamento
+                if (type === 'payment') {
+                    const paymentId = data.id;
 
-            console.log('💰 Status do pagamento atualizado:', {
-                id: paymentData.id,
-                status: paymentData.status,
-                external_reference: paymentData.external_reference
-            });
+                    // Consultar detalhes do pagamento
+                    const paymentData = await payment.get({ id: paymentId });
 
-            // TODO: Atualizar status no banco de dados
-            // TODO: Se status === 'approved', liberar ingresso
-            // TODO: Enviar email de confirmação
-        }
+                    console.log('💰 Detalhes do pagamento:', {
+                        id: paymentData.id,
+                        status: paymentData.status,
+                        status_detail: paymentData.status_detail,
+                        external_reference: paymentData.external_reference,
+                        payment_method_id: paymentData.payment_method_id,
+                        transaction_amount: paymentData.transaction_amount
+                    });
+
+                    // Processar baseado no status
+                    switch (paymentData.status) {
+                        case 'approved':
+                            const { handlePaymentApproved } = await import('../utils/webhookHelpers.js');
+                            await handlePaymentApproved(paymentData);
+                            break;
+                        case 'rejected':
+                        case 'cancelled':
+                            const { handlePaymentRejected } = await import('../utils/webhookHelpers.js');
+                            await handlePaymentRejected(paymentData);
+                            break;
+                        case 'pending':
+                        case 'in_process':
+                        case 'in_mediation':
+                        case 'authorized':
+                            const { handlePaymentPending } = await import('../utils/webhookHelpers.js');
+                            await handlePaymentPending(paymentData);
+                            break;
+                        default:
+                            console.log(`ℹ️ Status não tratado: ${paymentData.status}`);
+                    }
+                }
+
+                console.log(`✅ Processamento em background concluído`);
+            } catch (bgError) {
+                console.error('❌ Erro no processamento em background:', bgError);
+            }
+        });
 
     } catch (error) {
-        console.error('❌ Erro ao processar webhook:', error);
-        // Não retornar erro para não causar retry infinito
+        console.error('❌ Erro ao receber webhook:', error);
+        // Mesmo com erro, já respondeu 200 para evitar reenvios
     }
 };
 
