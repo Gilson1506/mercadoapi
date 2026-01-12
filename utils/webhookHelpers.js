@@ -79,12 +79,11 @@ export async function handlePaymentApproved(paymentData) {
             });
         }
 
-        // 4. Atualizar transactions para completed
+        // ✅ Atualizar transactions para completed
         const { data: updatedTransactions, error: transactionError } = await supabase
             .from('transactions')
             .update({
                 status: 'completed',
-                mercadopago_payment_id: id.toString(),
                 paid_at: paymentData.date_approved || new Date().toISOString(),
                 updated_at: new Date().toISOString()
             })
@@ -96,95 +95,45 @@ export async function handlePaymentApproved(paymentData) {
             console.error('❌ Erro ao atualizar transactions:', transactionError);
         } else {
             console.log(`✅ ${updatedTransactions?.length || 0} transactions atualizadas para completed`);
-            if (updatedTransactions && updatedTransactions.length > 0) {
-                updatedTransactions.forEach(t => {
-                    console.log(`   - Atualizada: ID ${t.id}, Amount: R$ ${t.amount}`);
-                });
-            }
         }
 
-        // 🆕 Se nenhuma transaction foi atualizada E não existe nenhuma transaction, criar uma nova
-        let transactionsForTickets = updatedTransactions;
-        if ((!updatedTransactions || updatedTransactions.length === 0) && (!existingTrx || existingTrx.length === 0)) {
-            console.log('⚠️ Nenhuma transaction encontrada para esta ordem, criando nova...');
+        // 🎫 Gerar tickets (1 por transaction)
+        if (updatedTransactions && updatedTransactions.length > 0) {
+            console.log('🎫 Gerando tickets...');
 
-            const { data: newTransaction, error: createError } = await supabase
-                .from('transactions')
-                .insert({
-                    order_id: order.id,
+            const ticketsRows = updatedTransactions.map(trx => {
+                const qrCodeTicket = `PLKTK_${order.event_id}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                return {
                     user_id: order.user_id,
-                    buyer_id: order.user_id,
                     event_id: order.event_id,
-                    mercadopago_payment_id: id.toString(),
-                    amount: transaction_amount,
-                    status: 'completed',
-                    payment_method: payment_method_id,
-                    paid_at: paymentData.date_approved || new Date().toISOString(),
-                    created_at: new Date().toISOString()
-                })
-                .select();
+                    price: trx.amount, // Usar amount da transaction (valor unitário)
+                    status: 'active',
+                    qr_code: qrCodeTicket,
+                    ticket_type: trx.metadata?.item?.name || 'Ingresso',
+                    metadata: {
+                        order_id: order.id,
+                        transaction_id: trx.id,
+                        mercadopago_payment_id: id.toString(),
+                        payment_method: payment_method_id,
+                        item: trx.metadata?.item
+                    }
+                };
+            });
 
-            if (createError) {
-                console.error('❌ Erro ao criar transaction:', createError);
+            const { data: ticketsInserted, error: ticketsErr } = await supabase
+                .from('tickets')
+                .insert(ticketsRows)
+                .select('id, status, qr_code');
+
+            if (ticketsErr) {
+                console.error('❌ Erro ao criar tickets:', ticketsErr);
             } else {
-                console.log('✅ Transaction criada pelo webhook:', newTransaction);
-                transactionsForTickets = newTransaction;
-            }
-        }
-
-        // 5. Gerar tickets automaticamente APENAS SE TEM TRANSACTIONS
-        if (transactionsForTickets && transactionsForTickets.length > 0) {
-            console.log('🎫 Gerando tickets para transactions recém-atualizadas...');
-
-            const orderMetadata = order.metadata || {};
-            const orderItems = orderMetadata.items || [];
-
-            if (orderItems.length > 0) {
-                const ticketsRows = [];
-
-                orderItems.forEach((item) => {
-                    const qty = Number(item.quantity || 1);
-                    const unitReais = Number((item.amount / 100).toFixed(2));
-
-                    for (let i = 0; i < qty; i++) {
-                        const qrCodeTicket = `PLKTK_${order.event_id}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-                        ticketsRows.push({
-                            user_id: order.user_id,
-                            event_id: order.event_id,
-                            price: unitReais,
-                            status: 'active',
-                            qr_code: qrCodeTicket,
-                            ticket_type: item.name || item.description || 'Ingresso',
-                            metadata: {
-                                order_id: order.id,
-                                mercadopago_payment_id: id.toString(),
-                                payment_method: payment_method_id,
-                                item: {
-                                    code: item.code,
-                                    amount_cents: item.amount
-                                }
-                            }
-                        });
-                    }
-                });
-
-                if (ticketsRows.length > 0) {
-                    const { data: ticketsInserted, error: ticketsErr } = await supabase
-                        .from('tickets')
-                        .insert(ticketsRows)
-                        .select('id, status, qr_code');
-
-                    if (ticketsErr) {
-                        console.error('❌ Erro ao criar tickets:', ticketsErr);
-                    } else {
-                        console.log(`✅ ${ticketsInserted?.length || 0} tickets gerados automaticamente pelo webhook!`);
-                    }
-                }
+                console.log(`✅ ${ticketsInserted?.length || 0} tickets gerados automaticamente!`);
             }
         } else {
-            console.log('ℹ️ Nenhuma transaction foi atualizada (pagamento já processado anteriormente)');
-            console.log('ℹ️ Tickets já devem existir - pulando geração de tickets');
+            console.log('ℹ️ Nenhuma transaction pendente para gerar tickets');
         }
+
 
     } catch (error) {
         console.error('❌ Erro ao processar pagamento aprovado:', error);
