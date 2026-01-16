@@ -135,6 +135,50 @@ export async function handlePaymentApproved(paymentData) {
         }
 
 
+
+        // 🔗 Processar comissão de afiliado
+        const affiliateCode = paymentData.metadata?.affiliate_code || paymentData.additional_info?.metadata?.affiliate_code;
+
+        if (affiliateCode) {
+            console.log(`🔗 Código de afiliado detectado para confirmação: ${affiliateCode}`);
+
+            // 1. Buscar afiliado
+            const { data: affiliate } = await supabase
+                .from('affiliates')
+                .select('id')
+                .eq('affiliate_code', affiliateCode)
+                .single();
+
+            if (affiliate) {
+                // 2. Buscar venda pendente para este evento
+                const { data: pendingSale } = await supabase
+                    .from('affiliate_sales')
+                    .select('id')
+                    .eq('affiliate_id', affiliate.id)
+                    .eq('event_id', order.event_id)
+                    .eq('commission_status', 'pending')
+                    .order('created_at', { ascending: false })
+                    .limit(1)
+                    .single();
+
+                if (pendingSale) {
+                    console.log('✅ Venda de afiliado pendente encontrada. Confirmando...');
+
+                    // 3. Confirmar comissão e vincular transaction
+                    await supabase
+                        .from('affiliate_sales')
+                        .update({
+                            commission_status: 'paid',
+                            transaction_id: updatedTransactions?.[0]?.id,
+                            updated_at: new Date().toISOString()
+                        })
+                        .eq('id', pendingSale.id);
+
+                    console.log(`✅ Comissão de afiliado confirmada: ${affiliateCode}`);
+                }
+            }
+        }
+
     } catch (error) {
         console.error('❌ Erro ao processar pagamento aprovado:', error);
     }
