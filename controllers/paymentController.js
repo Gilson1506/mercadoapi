@@ -61,9 +61,6 @@ export const processPayment = async (req, res) => {
 
         // 🆕 Adicionar device info se fornecido
         if (device) {
-            if (device.ip_address) {
-                paymentBody.device_id = device.ip_address;
-            }
             paymentBody.metadata = {
                 ...paymentBody.metadata,
                 user_agent: device.user_agent,
