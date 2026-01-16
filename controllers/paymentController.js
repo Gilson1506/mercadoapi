@@ -8,6 +8,9 @@ const client = new MercadoPagoConfig({
 
 const payment = new Payment(client);
 
+// 🆕 Cache de webhooks processados (idempotência)
+const processedWebhooks = new Set();
+
 /**
  * Processar pagamento (Cartão, Pix, Boleto)
  */
@@ -24,7 +27,10 @@ export const processPayment = async (req, res) => {
             lastName,
             description,
             externalReference,
-            address // Necessário para boleto
+            address, // Necessário para boleto
+            payer,          // 🆕 Dados completos do pagador
+            device,         // 🆕 Informações do dispositivo
+            additional_info // 🆕 Informações adicionais da compra
         } = req.body;
 
         console.log('💳 Processando pagamento:', { paymentMethod, amount, email });
@@ -44,7 +50,7 @@ export const processPayment = async (req, res) => {
             transaction_amount: parseFloat(amount),
             description: description || 'Compra de ingresso',
             external_reference: externalReference || `ORDER_${Date.now()}`,
-            payer: {
+            payer: payer || {
                 email,
                 identification: {
                     type: 'CPF',
@@ -52,6 +58,24 @@ export const processPayment = async (req, res) => {
                 }
             }
         };
+
+        // 🆕 Adicionar device info se fornecido
+        if (device) {
+            if (device.ip_address) {
+                paymentBody.device_id = device.ip_address;
+            }
+            paymentBody.metadata = {
+                ...paymentBody.metadata,
+                user_agent: device.user_agent,
+                ip_address: device.ip_address,
+                platform: device.platform
+            };
+        }
+
+        // 🆕 Adicionar additional_info se fornecido
+        if (additional_info) {
+            paymentBody.additional_info = additional_info;
+        }
 
         // Adicionar notification_url apenas se configurado e válido (HTTPS)
         if (process.env.WEBHOOK_URL && process.env.WEBHOOK_URL.startsWith('https://')) {
@@ -188,12 +212,36 @@ export const processPayment = async (req, res) => {
  */
 export const handleWebhook = async (req, res) => {
     try {
-        const { type, data } = req.body;
+        const { type, data, topic } = req.body;
 
-        console.log('🔔 Webhook recebido:', { type, data });
+        console.log('🔔 Webhook recebido:', { type, topic, data });
 
         // ✅ RESPONDER 200 OK IMEDIATAMENTE (evita timeout)
         res.sendStatus(200);
+
+        // 🆕 VALIDAR PAYLOAD antes de processar
+        if (!type && !topic) {
+            console.log('⚠️ Webhook sem type/topic, ignorando');
+            return;
+        }
+
+        if (!data || !data.id) {
+            console.log('⚠️ Webhook sem data.id, ignorando');
+            return;
+        }
+
+        // 🆕 VERIFICAR SE JÁ PROCESSAMOS (idempotência)
+        const paymentId = data.id;
+        const cacheKey = `webhook_${paymentId}`;
+
+        if (processedWebhooks.has(cacheKey)) {
+            console.log(`ℹ️ Webhook ${paymentId} já processado, ignorando duplicata`);
+            return;
+        }
+
+        // Marcar como processado (expira em 1 hora)
+        processedWebhooks.add(cacheKey);
+        setTimeout(() => processedWebhooks.delete(cacheKey), 3600000);
 
         // ✅ PROCESSAR EM BACKGROUND (não bloqueia resposta)
         setImmediate(async () => {
@@ -201,8 +249,7 @@ export const handleWebhook = async (req, res) => {
                 console.log(`⚡ Iniciando processamento em background...`);
 
                 // Processar notificação de pagamento
-                if (type === 'payment') {
-                    const paymentId = data.id;
+                if (type === 'payment' || topic === 'payment') {
 
                     // Consultar detalhes do pagamento
                     const paymentData = await payment.get({ id: paymentId });
@@ -288,16 +335,37 @@ export const getInstallments = async (req, res) => {
     try {
         const { amount } = req.params;
 
-        // Opções de parcelamento padrão (pode ser customizado)
+        // 🆕 Taxas atualizadas do Mercado Pago (Janeiro 2026)
+        const feePercentages = {
+            1: 4.99,   // 1x - crédito à vista
+            2: 2.53,   // 2x
+            3: 4.62,   // 3x
+            4: 6.69,   // 4x
+            5: 8.66,   // 5x
+            6: 9.96,   // 6x
+            7: 11.24,  // 7x
+            8: 12.50,  // 8x
+            9: 13.73,  // 9x
+            10: 14.93, // 10x
+            11: 16.12, // 11x
+            12: 17.28  // 12x
+        };
+
         const installmentOptions = [];
         const maxInstallments = 12;
         const amountValue = parseFloat(amount);
 
         for (let i = 1; i <= maxInstallments; i++) {
+            const feePercentage = feePercentages[i] || 0;
+            const totalWithFee = amountValue * (1 + feePercentage / 100);
+            const installmentAmount = totalWithFee / i;
+
             installmentOptions.push({
                 installments: i,
-                installment_amount: (amountValue / i).toFixed(2),
-                total_amount: amountValue.toFixed(2)
+                installment_amount: installmentAmount.toFixed(2),
+                total_amount: totalWithFee.toFixed(2),
+                fee_percentage: feePercentage,
+                original_amount: amountValue.toFixed(2)
             });
         }
 
